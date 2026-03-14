@@ -1,37 +1,63 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import Optional, List
 
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
-import generator as generator
+from app.ingestion import ingest_data, get_vector_store
+from app.agent import query_with_agent, get_similar_documents
 
 app = FastAPI()
 
 class QueryRequest(BaseModel):
     question: str
 
+class IngestRequest(BaseModel):
+    source_type: str
+    source_path: Optional[str] = None
+    urls: Optional[List[str]] = None
+    chunk_size: int = 1000
+    chunk_overlap: int = 200
+
 @app.get("/")
 async def root():
-    return {"message": "hello world"}
+    return {"message": "RAG Application with LangChain"}
+
+@app.post("/ingest")
+def ingest(req: IngestRequest):
+    try:
+        vector_store, chunks = ingest_data(
+            source_type=req.source_type,
+            source_path=req.source_path,
+            urls=req.urls
+        )
+        return {
+            "status": "success",
+            "chunks_created": len(chunks)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/query")
 def query(req: QueryRequest):
-    query_embedding = model.encode([req.question])
-    D,I = index.search(np.array(query_embedding), k=2)
-    best_chunk  = docs[I[0][0]]
-    answer = generator.generate_answer(req.question, best_chunk)
+    vector_store = get_vector_store()
+    
+    if vector_store is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No data ingested. Please call /ingest first."
+        )
+    
+    result = query_with_agent(req.question, vector_store)
+    return result
 
-    return {
-        "question" : req.question,
-        "retrieved_context" : best_chunk,
-        "generated_answer":answer
-    }
-
-
-docs = open("../data/docs.txt").read().split("\n\n")
-model = SentenceTransformer("all-MiniLM-L6-v2")
-doc_embeddings = model.encode(docs)
-
-index = faiss.IndexFlatL2(doc_embeddings[0].shape[0])
-index.add(doc_embeddings)
+@app.get("/similar/{question}")
+def similar(question: str, k: int = 2):
+    vector_store = get_vector_store()
+    
+    if vector_store is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No data ingested. Please call /ingest first."
+        )
+    
+    docs = get_similar_documents(question, vector_store, k)
+    return {"documents": docs}
