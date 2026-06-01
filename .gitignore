@@ -8,3 +8,5 @@ venv/
 devlog.md
 ARCHITECTURE.md
 AGENTS.md
+handoff.md 
+/docs/decision-log.md

@@ -30,3 +30,14 @@ def get_vector_store() -> Chroma | None:
         persist_directory=PERSIST_DIRECTORY,
         embedding_function=embeddings,
     )
+
+
+def get_all_documents() -> list[Document]:
+    store = get_vector_store()
+    if store is None:
+        return []
+    data = store.get(include=["documents", "metadatas"])
+    return [
+        Document(page_content=text, metadata=meta)
+        for text, meta in zip(data["documents"], data["metadatas"])
+    ]

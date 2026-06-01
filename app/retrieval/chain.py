@@ -2,19 +2,25 @@ import re
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
-from langchain_huggingface import HuggingFacePipeline
+from langchain_huggingface import ChatHuggingFace, HuggingFacePipeline
 from transformers import pipeline
 
+from app.retrieval.config import load_prompt
+from app.retrieval.reranker import Reranker
+from app.retrieval.retriever import HybridRetriever
 from app.schemas import Citation, QueryResponse
 
-DEFAULT_K = 4
+HYBRID_K = 10
+RERANK_TOP_K = 4
 HF_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_retriever(vector_store: Chroma, k: int = DEFAULT_K):
-    return vector_store.as_retriever(search_kwargs={"k": k})
+def build_retriever(vector_store: Chroma):
+    from app.ingestion.store import get_all_documents
+
+    all_docs = get_all_documents()
+    return HybridRetriever(vector_store, all_docs, k=HYBRID_K)
 
 
 def get_hf_llm():
@@ -25,7 +31,8 @@ def get_hf_llm():
         temperature=0.1,
         do_sample=False,
     )
-    return HuggingFacePipeline(pipeline=hf_pipeline)
+    llm = HuggingFacePipeline(pipeline=hf_pipeline)
+    return ChatHuggingFace(llm=llm)
 
 
 def format_docs_with_sources(docs: list[Document]) -> str:
@@ -43,22 +50,12 @@ def format_docs_with_sources(docs: list[Document]) -> str:
     return "\n\n".join(formatted)
 
 
-CITATION_PROMPT = PromptTemplate.from_template(
-    """You are an AI assistant answering questions based on provided documents.
-
-Documents:
-{context}
-
-Question: {question}
-
-Instructions:
-1. Answer the question using ONLY the provided documents.
-2. For each factual claim, cite the source document number in brackets like [1], [2].
-3. If the documents don't contain enough information, say so.
-4. Be concise but thorough.
-
-Answer:"""
-)
+def _clean_chat_output(text: str) -> str:
+    idx = text.find("<|im_start|>assistant")
+    if idx != -1:
+        text = text[idx + len("<|im_start|>assistant") :]
+        text = text.replace("<|im_end|>", "").strip()
+    return text
 
 
 def parse_citations(answer: str, docs: list[Document]) -> tuple[str, list[Citation]]:
@@ -99,7 +96,7 @@ def query_with_citation(question: str, vector_store: Chroma | None = None) -> Qu
             citations=[],
         )
 
-    retriever = get_retriever(vector_store)
+    retriever = build_retriever(vector_store)
     docs = retriever.invoke(question)
 
     if not docs:
@@ -109,21 +106,39 @@ def query_with_citation(question: str, vector_store: Chroma | None = None) -> Qu
             citations=[],
         )
 
+    reranker = Reranker()
+    docs = reranker.rerank(question, docs, top_k=RERANK_TOP_K)
+
     context = format_docs_with_sources(docs)
     llm = get_hf_llm()
 
+    prompt = load_prompt("default")
     chain = (
         {
             "context": RunnablePassthrough(),
             "question": RunnablePassthrough(),
         }
-        | CITATION_PROMPT
+        | prompt
         | llm
     )
 
-    answer_text = chain.invoke({"context": context, "question": question})
-
+    response = chain.invoke({"context": context, "question": question})
+    answer_text = _clean_chat_output(response.content)
     answer_text, citations = parse_citations(answer_text, docs)
+
+    if not citations:
+        strict_prompt = load_prompt("strict")
+        strict_chain = (
+            {
+                "context": RunnablePassthrough(),
+                "question": RunnablePassthrough(),
+            }
+            | strict_prompt
+            | llm
+        )
+        response = strict_chain.invoke({"context": context, "question": question})
+        answer_text = _clean_chat_output(response.content)
+        answer_text, citations = parse_citations(answer_text, docs)
 
     return QueryResponse(
         question=question,

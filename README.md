@@ -4,28 +4,62 @@ A **Retrieval-Augmented Generation (RAG)** system built with **FastAPI**, **Lang
 
 ---
 
-## What it Does
+## Pipeline
 
-- Ingest documents from PDFs, markdown files, or web URLs
-- Split into chunks 
-- Embed with BGE-small and store in Chroma vector DB
-- Retrieve top-k relevant chunks for a query
-- Generate an answer with source citations using a HuggingFace model
+### Ingestion
+
+```
+Document (PDF / Markdown / Web URL)
+    │
+    ▼
+Loader (PyMuPDF / pathlib / WebBaseLoader)
+    │
+    ▼
+Splitter (RecursiveCharacterTextSplitter 800/100 + MarkdownHeaderTextSplitter)
+    │
+    ▼
+Embedder (BGE-small-v1.5 → 384-dim vectors)
+    │
+    ▼
+Chroma vector store (persisted to ./chroma_db)
+```
+
+
+
+### Query
+
+```
+Query
+    │
+    ▼
+HybridRetriever (BM25 + vector, weighted 0.5/0.5 fusion, top-10)
+    │
+    ▼
+Cross-encoder reranker (ms-marco-MiniLM-L-6-v2, top-4)
+    │
+    ▼
+Qwen2.5-0.5B-Instruct via ChatHuggingFace
+    │
+    ▼
+Answer with citations
+```
+
 
 ---
 
 ## Tech Stack
 
 - **FastAPI** — REST API backend
-- **LangChain** — Document loading, splitting, retrieval 
+- **LangChain** — Document loading, splitting, retrieval, chat model interface
 - **Chroma DB** — Vector database for embeddings
-- **HuggingFace BGE-small** — Embedding model (local, free)
-- **HuggingFace Qwen 2.5 0.5B-Instruct** — Answer generation (local, free)
+- **HuggingFace BGE-small** — Embedding model (local, free, 33 MB)
+- **HuggingFace Qwen 2.5 0.5B-Instruct** — Answer generation (local, free, 900 MB)
+- **Cross-encoder ms-marco-MiniLM-L-6-v2** — Reranker (local, free, 80 MB)
+- **rank-bm25** — Sparse keyword retrieval
 - **PyMuPDF** — PDF text extraction
-- **uv** — Python package manager 
+- **uv** — Python package manager
 
 ---
-
 
 ## Setup
 
@@ -59,12 +93,37 @@ uv run python -m app.cli ingest web --urls https://en.wikipedia.org/wiki/RAG
 uv run python -m app.cli query "<query>"
 ```
 
+---
+
+## Project Structure
+
+```
+app/
+├── ingestion/
+│   ├── loader.py      # PDF / Markdown / Web loaders
+│   ├── splitter.py    # RecursiveCharacterTextSplitter + MarkdownHeaderTextSplitter
+│   └── store.py       # Chroma persistence, get_all_documents() for BM25 corpus
+├── retrieval/
+│   ├── chain.py       # query_with_citation() — main orchestration
+│   ├── config.py      # Loads prompts.yaml → ChatPromptTemplate
+│   ├── prompts.yaml   # default + strict citation prompts
+│   ├── reranker.py    # Cross-encoder reranker
+│   └── retriever.py   # HybridRetriever (BM25 + vector fusion)
+├── schemas.py         # Pydantic v2 models
+├── main.py            # FastAPI entry (POST /ingest, POST /query)
+└── cli.py             # CLI entry (ingest, query subcommands)
+```
+
+---
 
 ## Development
 
 ```bash
-# Run tests
+# Run all tests
 uv run pytest -v
+
+# Fast tests only (skip model downloads)
+uv run pytest -v -m "not slow"
 
 # Lint
 uv run ruff check .
@@ -72,3 +131,5 @@ uv run ruff check .
 # Format
 uv run ruff format .
 ```
+
+

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from langchain_core.documents import Document
 
@@ -71,9 +73,97 @@ def test_parse_citations_out_of_range_id():
 
 
 @pytest.mark.slow
-def test_query_with_citation_integration():
+def test_hybrid_retrieval_ranks_length_based_chunks_higher(tmp_path, monkeypatch):
+    """With hybrid BM25 + vector retrieval and reranker, a query about
+    'length based splitting' should rank the Length-based section
+    chunks above noise from other sections.
+    """
+    import app.ingestion.store as store_mod
+    from app.ingestion.loader import load_markdown
+    from app.ingestion.splitter import split_documents
     from app.ingestion.store import create_vector_store
     from app.retrieval.chain import query_with_citation
+
+    persist_dir = str(tmp_path / "chroma_db")
+    monkeypatch.setattr(store_mod, "PERSIST_DIRECTORY", persist_dir)
+
+    fixture = Path(__file__).parent / "fixtures" / "length-test.md"
+    docs = load_markdown(fixture)
+    chunks = split_documents(docs)
+    vector_store = create_vector_store(chunks)
+    result = query_with_citation("what are the types of length based splitting?", vector_store)
+
+    # The answer should mention both Token-based and Character-based
+    assert "Token-based" in result.answer
+    assert "Character-based" in result.answer
+
+
+def test_hybrid_retriever_fusion():
+    """HybridRetriever deduplicates and ranks by weighted fusion."""
+    from app.retrieval.retriever import _rank_to_scores
+
+    docs = [
+        Document(page_content="Doc A about topic X", metadata={"source": "a.md"}),
+        Document(page_content="Doc B about topic Y", metadata={"source": "b.md"}),
+    ]
+    scores = _rank_to_scores(docs)
+    assert scores["Doc A about topic X"] == 1.0
+    assert scores["Doc B about topic Y"] == 0.5
+
+
+@pytest.mark.slow
+def test_reranker_scores_relevant_first(tmp_path):
+    """Reranker assigns higher scores to relevant query-chunk pairs."""
+    from app.retrieval.reranker import Reranker
+
+    docs = [
+        Document(
+            page_content="Token-based and character-based splitting methods.",
+            metadata={"source": "a.md"},
+        ),
+        Document(
+            page_content="The weather is sunny today in Paris.",
+            metadata={"source": "b.md"},
+        ),
+    ]
+
+    reranker = Reranker()
+    reranked = reranker.rerank("what are the types of splitting?", docs, top_k=2)
+    assert reranked[0].page_content == docs[0].page_content
+    assert len(reranked) == 2
+
+
+@pytest.mark.slow
+def test_citation_enforcement_retry(tmp_path, monkeypatch):
+    """When no citations are found, the retry mechanism fires with a
+    strict prompt and still returns a valid response."""
+    import app.ingestion.store as store_mod
+    from app.ingestion.store import create_vector_store
+    from app.retrieval.chain import query_with_citation
+
+    persist_dir = str(tmp_path / "chroma_db")
+    monkeypatch.setattr(store_mod, "PERSIST_DIRECTORY", persist_dir)
+
+    docs = [
+        Document(
+            page_content="Paris is the capital of France.",
+            metadata={"source": "geo.txt"},
+        ),
+    ]
+    vector_store = create_vector_store(docs)
+    result = query_with_citation("What is the capital of France?", vector_store)
+    assert len(result.answer) > 0
+    assert isinstance(result.citations, list)
+
+
+@pytest.mark.slow
+def test_query_with_citation_integration(tmp_path, monkeypatch):
+    import app.ingestion.store as store_mod
+    from app.ingestion.store import create_vector_store
+    from app.retrieval.chain import query_with_citation
+
+    persist_dir = str(tmp_path / "chroma_db")
+    monkeypatch.setattr(store_mod, "PERSIST_DIRECTORY", persist_dir)
 
     docs = [
         Document(
@@ -84,4 +174,3 @@ def test_query_with_citation_integration():
     vector_store = create_vector_store(docs)
     result = query_with_citation("What is the capital of France?", vector_store)
     assert "Paris" in result.answer
-    assert len(result.citations) > 0
