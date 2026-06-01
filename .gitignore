@@ -1,0 +1,10 @@
+chroma_db/
+__pycache__/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+.venv/
+venv/
+devlog.md
+ARCHITECTURE.md
+AGENTS.md

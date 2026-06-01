@@ -1,63 +1,36 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Optional, List
 
-from app.ingestion import ingest_data, get_vector_store
-from app.agent import query_with_agent, get_similar_documents
+from app.ingestion.loader import load_document
+from app.ingestion.splitter import split_documents
+from app.ingestion.store import create_vector_store, get_vector_store
+from app.retrieval.chain import query_with_citation
+from app.schemas import IngestRequest, QueryRequest, QueryResponse
 
-app = FastAPI()
+app = FastAPI(title="RAG Application", version="0.1.0")
 
-class QueryRequest(BaseModel):
-    question: str
-
-class IngestRequest(BaseModel):
-    source_type: str
-    source_path: Optional[str] = None
-    urls: Optional[List[str]] = None
-    chunk_size: int = 1000
-    chunk_overlap: int = 200
 
 @app.get("/")
 async def root():
-    return {"message": "RAG Application with LangChain"}
+    return {"message": "RAG Application with Citation"}
+
 
 @app.post("/ingest")
 def ingest(req: IngestRequest):
     try:
-        vector_store, chunks = ingest_data(
-            source_type=req.source_type,
-            source_path=req.source_path,
-            urls=req.urls
-        )
-        return {
-            "status": "success",
-            "chunks_created": len(chunks)
-        }
+        documents = load_document(req.source_type, file_path=req.file_path, urls=req.urls)
+        chunks = split_documents(documents)
+        create_vector_store(chunks)
+        return {"status": "success", "chunks_created": len(chunks)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/query")
+
+@app.post("/query", response_model=QueryResponse)
 def query(req: QueryRequest):
     vector_store = get_vector_store()
-    
     if vector_store is None:
         raise HTTPException(
             status_code=400,
-            detail="No data ingested. Please call /ingest first."
+            detail="No documents ingested. Call /ingest first.",
         )
-    
-    result = query_with_agent(req.question, vector_store)
-    return result
-
-@app.get("/similar/{question}")
-def similar(question: str, k: int = 2):
-    vector_store = get_vector_store()
-    
-    if vector_store is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No data ingested. Please call /ingest first."
-        )
-    
-    docs = get_similar_documents(question, vector_store, k)
-    return {"documents": docs}
+    return query_with_citation(req.question, vector_store)
